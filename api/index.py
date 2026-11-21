@@ -4,7 +4,7 @@ from fastapi import FastAPI, Request
 
 app = FastAPI()
 
-API_KEY = os.environ.get("ORCA_API_KEY", "")
+API_KEY = os.environ.get("ORCA_API_KEY", "").strip()
 MODEL = "deepseek/deepseek-v4-flash-free"
 
 sessions = {}
@@ -16,30 +16,23 @@ SYSTEM_PROMPT = (
     "Не используй смайлики, звездочки и разметку текста."
 )
 
-@app.get("/")
-async def healthcheck():
-    return {"status": "ok"}
-
 @app.post("/{full_path:path}")
 async def alice_webhook(request: Request, full_path: str = ""):
-    try:
-        data = await request.json()
-    except Exception:
-        return make_response("Не понял запрос, бро.", False)
-
+    data = await request.json()
     session_id = data.get("session", {}).get("session_id", "default")
     user_text = data.get("request", {}).get("original_utterance", "").strip()
     is_new = data.get("session", {}).get("new", False)
 
-    # Приветствие при запуске навыка
     if is_new and not user_text:
         sessions[session_id] = [{"role": "system", "content": SYSTEM_PROMPT}]
         return make_response("Здарова! Китайский брат на связи. Чё хотел?", False)
 
-    # Команда выхода из навыка
     if user_text.lower() in ["хватит", "выход", "пока", "стоп", "закройся"]:
         sessions.pop(session_id, None)
         return make_response("Бывай, бро! Если чё — зови.", True)
+
+    if not API_KEY:
+        return make_response("Бро, ключ ORCA_API_KEY пустой! Добавь его в Vercel и сделай Redeploy.", False)
 
     if session_id not in sessions:
         sessions[session_id] = [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -50,7 +43,7 @@ async def alice_webhook(request: Request, full_path: str = ""):
     try:
         async with httpx.AsyncClient(timeout=4.0) as client:
             resp = await client.post(
-                "https://orcarouter.ai",
+                "https://api.orcarouter.ai/v1/chat/completions",
                 headers={
                     "Authorization": f"Bearer {API_KEY}",
                     "Content-Type": "application/json",
@@ -62,15 +55,18 @@ async def alice_webhook(request: Request, full_path: str = ""):
                     "temperature": 0.7,
                 },
             )
+            if resp.status_code != 200:
+                return make_response(f"OrcaRouter отбил код {resp.status_code}: {resp.text[:80]}", False)
+
             result = resp.json()
             reply = result["choices"][0]["message"]["content"].strip()
             sessions[session_id].append({"role": "assistant", "content": reply})
             return make_response(reply, False)
 
     except httpx.TimeoutException:
-        return make_response("Бро, сервер чёт задумался дольше 4 секунд. Спроси покороче!", False)
+        return make_response("Бро, Китай думает дольше 4 секунд. Спроси покороче!", False)
     except Exception as e:
-        return make_response(f"Чёт сломалось на связи с Китаем: {str(e)[:60]}", False)
+        return make_response(f"Ошибка: {str(e)[:80]}", False)
 
 
 def make_response(text: str, end_session: bool):

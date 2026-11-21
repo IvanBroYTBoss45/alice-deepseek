@@ -7,7 +7,6 @@ app = FastAPI()
 API_KEY = os.environ.get("ORCA_API_KEY", "")
 MODEL = "deepseek/deepseek-v4-flash-free"
 
-# Храним историю диалога по ID сессии в оперативке
 sessions = {}
 
 SYSTEM_PROMPT = (
@@ -17,13 +16,20 @@ SYSTEM_PROMPT = (
     "Не используй смайлики, звездочки и разметку текста."
 )
 
-@app.post("/webhook")
-@app.post("/")
-async def alice_webhook(request: Request):
-    data = await request.json()
-    session_id = data["session"]["session_id"]
-    user_text = data["request"].get("original_utterance", "").strip()
-    is_new = data["session"].get("new", False)
+@app.get("/")
+async def healthcheck():
+    return {"status": "ok"}
+
+@app.post("/{full_path:path}")
+async def alice_webhook(request: Request, full_path: str = ""):
+    try:
+        data = await request.json()
+    except Exception:
+        return make_response("Не понял запрос, бро.", False)
+
+    session_id = data.get("session", {}).get("session_id", "default")
+    user_text = data.get("request", {}).get("original_utterance", "").strip()
+    is_new = data.get("session", {}).get("new", False)
 
     # Приветствие при запуске навыка
     if is_new and not user_text:
@@ -35,16 +41,14 @@ async def alice_webhook(request: Request):
         sessions.pop(session_id, None)
         return make_response("Бывай, бро! Если чё — зови.", True)
 
-    # Инициализация истории, если сессия новая, но сразу с вопросом
     if session_id not in sessions:
         sessions[session_id] = [{"role": "system", "content": SYSTEM_PROMPT}]
 
     sessions[session_id].append({"role": "user", "content": user_text})
-    # Оставляем системный промпт + последние 6 сообщений, чтобы не тупило
     history = [sessions[session_id][0]] + sessions[session_id][-6:]
 
     try:
-        async with httpx.AsyncClient(timeout=3.8) as client:
+        async with httpx.AsyncClient(timeout=4.0) as client:
             resp = await client.post(
                 "https://orcarouter.ai",
                 headers={
@@ -64,9 +68,9 @@ async def alice_webhook(request: Request):
             return make_response(reply, False)
 
     except httpx.TimeoutException:
-        return make_response("Бро, сервер чёт задумался дольше 3 секунд. Повтори вопрос покороче!", False)
-    except Exception:
-        return make_response("Чёт связь с Китаем оборвалась, попробуй ещё раз.", False)
+        return make_response("Бро, сервер чёт задумался дольше 4 секунд. Спроси покороче!", False)
+    except Exception as e:
+        return make_response(f"Чёт сломалось на связи с Китаем: {str(e)[:60]}", False)
 
 
 def make_response(text: str, end_session: bool):
